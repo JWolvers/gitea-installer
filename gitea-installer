@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+import argparse
+import requests
+import os
+import platform
+import shutil
+import hashlib
+import pwd
+import stat
+
+#Conf values#
+gitea_user = 'gitea'
+binary_name = 'gitea'
+tmp_dir = '/tmp/gitea-installer'
+install_dir = '/opt/gitea'
+service_dir = '/etc/systemd/system/'
+service_file = 'gitea.service'
+#Conf values#
+service_path = os.path.join(service_dir, service_file)
+binary_path = os.path.join(install_dir, binary_name)
+binary_path_temp = os.path.join(tmp_dir, binary_name)
+sha256_path_temp = os.path.join(tmp_dir, binary_name + '.sha256')
+
+def enableVerbose(verbose):
+    return print if verbose else lambda *a, **k: None
+
+def Confirm(message, default=True):
+    while True:
+        x = input(message).lower()
+        if(x == 'y' or x == 'yes'):
+            return True
+        if(x == 'n' or x == 'no'):
+            return False
+        if(x == ''):
+            return default
+        print("Please type 'y' or 'n'")
+
+class bcolors:
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+
+
+parser = argparse.ArgumentParser(description='A gitea installer / updater')
+parser.add_argument('--version', dest='version', default='latest',
+                    help='Gitea version to install / update to (Example: 1.10.0) (default: latest)')
+parser.add_argument('-q', '--quiet', dest='quiet', action='store_const',
+                    const=True, default=False,
+                    help='Add this flag to install without user input.')
+parser.add_argument('-rc', '--enable-rc', dest='rc_enabled', action='store_const',
+                    const=True, default=False,
+                    help='Add this flag to allow installing release candinates')
+parser.add_argument('-dev', '--enable-dev', dest='dev_enabled', action='store_const',
+                    const=True, default=False,
+                    help='Add this flag to allow installing development builds')
+parser.add_argument('-v', '--verbose', dest='verbose', action='store_const',
+                    const=True, default=False,
+                    help='Print verbose messages during install.')
+parser.add_argument('-s', '--skip-verify', dest='skip_verify', action='store_const',
+                    const=True, default=False,
+                    help='Skip the verification of the sha256 hashes')
+args = parser.parse_args()
+
+printv = enableVerbose(args.verbose)
+
+target_version = None
+if(args.version != 'latest'):
+    target_version = args.version
+else:
+    print(bcolors.OKBLUE + 'Looking up latest version number on gitea.com...' + bcolors.ENDC)
+    r = requests.get('https://gitea.com/api/v1/repos/gitea/gitea_mirror/tags')
+    if(r.status_code == 200):
+        releases = r.json()
+        if(not args.dev_enabled):
+            releases = [x for x in releases if 'dev' not in x['name']]
+        if(not args.rc_enabled):
+            releases = [x for x in releases if 'rc' not in x['name']]
+        if(not releases):
+            print(bcolors.WARNING + 'No releases found..' + bcolors.ENDC)
+            exit(-1)
+        target_version = releases[0]['name']
+    else:
+        print(bcolors.FAIL + 'Can\'t reach gitea.com to check latest version' + bcolors.ENDC)
+        exit(-1)
+
+if(target_version.startswith('v')):
+    target_version = target_version.replace('v', '',1)
+
+if(not args.quiet):
+    if(not Confirm('Are you sure you want to install v' + target_version + ' (Y/n)')):
+        exit(-1)
+if(not os.path.isdir(install_dir)):
+    msg = 'Installing Gitea v' + target_version
+else:
+    msg = 'Upgrading Gitea to v' + target_version
+    if(os.path.isfile(binary_path)):
+        stream = os.popen(binary_path + ' -v')
+        output = stream.read()
+        if(target_version in output):
+            msg = 'Gitea v' + target_version + ' already installed'
+            print(bcolors.OKGREEN + '=' * len(msg) + bcolors.ENDC)
+            print(bcolors.OKGREEN + msg + bcolors.ENDC)
+            print(bcolors.OKGREEN + '=' * len(msg) + bcolors.ENDC)
+            exit(0)
+
+print(bcolors.OKGREEN + '=' * len(msg) + bcolors.ENDC)
+print(bcolors.OKGREEN + msg + bcolors.ENDC)
+print(bcolors.OKGREEN + '=' * len(msg) + bcolors.ENDC)
+
+if(os.path.isdir(tmp_dir)):
+    printv('Cleaning up previous installation...')
+    shutil.rmtree(tmp_dir)
+
+printv('Creating temp directory: ' + tmp_dir)
+os.mkdir(tmp_dir)
+
+
+
+if(not os.path.isdir(install_dir)):
+    printv('Creating install directory: ' + install_dir)
+    os.mkdir(install_dir)
+elif(os.path.isfile(binary_path)):
+    printv('Removing old binary')
+    os.remove(binary_path)
+
+arch = platform.machine()
+
+base_url = 'https://dl.gitea.io/gitea/' + target_version + '/'
+if(arch == 'i368'):
+    printv('Detected machine as i368')
+    base_url = base_url + 'gitea-' + target_version + '-linux-386'
+elif(arch == 'x86_64'):
+    printv('Detected machine as x86_64')
+    base_url = base_url + 'gitea-' + target_version + '-linux-amd64'
+elif(arch == 'armv5l'):
+    printv('Detected machine as armv6l')
+    base_url = base_url + 'gitea-' + target_version + '-linux-arm-5'
+elif(arch == 'armv6l'):
+    printv('Detected machine as armv6l')
+    base_url = base_url + 'gitea-' + target_version + '-linux-arm-6'
+elif(arch == 'armv64'):
+    printv('Detected machine as arm64')
+    base_url = base_url + 'gitea-' + target_version + '-linux-arm64'
+else:
+    print(bcolors.FAIL + arch + ' not supported' + bcolors.ENDC)
+    exit(-1)
+
+print(bcolors.OKBLUE + 'Downloading gitea...' + bcolors.ENDC)
+printv(base_url)
+with open(binary_path_temp, 'wb') as f:
+    r = requests.get(base_url, stream=True)
+    shutil.copyfileobj(r.raw, f)
+
+if(not args.skip_verify):
+    print(bcolors.OKBLUE + 'Downloading gitea sha256 hash...' + bcolors.ENDC)
+    correct_hash = requests.get(base_url + '.sha256').content
+
+    sha256_hash = hashlib.sha256()
+    with open(binary_path_temp,"rb") as f:
+        # Read and update hash string value in blocks of 4K
+        for byte_block in iter(lambda: f.read(4096),b""):
+            sha256_hash.update(byte_block)
+
+    if(not sha256_hash.hexdigest() in str(correct_hash)):
+        print(bcolors.FAIL + 'Hashes do not match' + bcolors.ENDC)
+        exit(-1)
+    else:
+        print(bcolors.OKGREEN + 'Verified download' + bcolors.ENDC)
+
+try:
+    printv('Checking if gitea user exist')
+    pwd.getpwnam(gitea_user)
+except KeyError:
+    print(bcolors.OKBLUE + 'Creating gitea user' + bcolors.ENDC)
+    if(shutil.which('adduser') is not None):
+        if(os.system('adduser \
+                            --system \
+                            --shell /bin/bash \
+                            --gecos \'Gitea daemon user\' \
+                            --group \
+                            --disabled-password \
+                            --home ' + install_dir + ' ' + \
+                            gitea_user)):
+            print(bcolors.FAIL + 'Error creating gitea user' + bcolors.ENDC)
+            exit(-1)
+    elif(shutil.which('useradd') is not None):
+        if(os.system('useradd \
+                            --system \
+                            --shell /bin/bash \
+                            --comment \'Gitea daemon user\' \
+                            --user-group \
+                            --home-dir ' + install_dir + ' ' + \
+                            gitea_user)):
+            print(bcolors.FAIL + 'Error creating gitea user' + bcolors.ENDC)
+            exit(-1)
+try:
+    printv('Checking if gitea user exist')
+    user = pwd.getpwnam(gitea_user)
+except KeyError:
+    print(bcolors.FAIL + 'Could not chown!' + bcolors.ENDC)
+    exit(-1)
+os.chown(install_dir, user.pw_uid, user.pw_gid)
+shutil.copyfile(binary_path_temp, binary_path)
+st = os.stat(binary_path)
+os.chown(binary_path, user.pw_uid, user.pw_gid)
+os.chmod(binary_path, st.st_mode | stat.S_IEXEC)
+if(not os.path.isfile(service_path)):
+    shutil.copyfile(service_file, service_path)
+
+if(os.system('setcap cap_net_bind_service+ep ' + binary_path)):
+    print(bcolors.FAIL + 'Failed to grant gitea net cap' + bcolors.ENDC)
+    exit(-1)
+
+if(os.system('systemctl enable ' + service_file)):
+    print(bcolors.FAIL + 'Failed to enable gitea' + bcolors.ENDC)
+    exit(-1)
+
+if(os.system('systemctl restart ' + service_file)):
+    print(bcolors.FAIL + 'Failed to restart gitea' + bcolors.ENDC)
+    exit(-1)
+
+print(bcolors.OKGREEN + 'Install complete' + bcolors.ENDC)
